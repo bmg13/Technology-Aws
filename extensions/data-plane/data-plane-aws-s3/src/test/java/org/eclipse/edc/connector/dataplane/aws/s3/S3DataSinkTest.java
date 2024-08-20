@@ -26,7 +26,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.ArgumentsProvider;
 import org.junit.jupiter.params.provider.ArgumentsSource;
-import org.junit.platform.commons.util.StringUtils;
 import org.mockito.ArgumentCaptor;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -85,8 +84,8 @@ public class S3DataSinkTest {
     }
 
     @ParameterizedTest
-    @ArgumentsSource(SinglePartsInputs.class)
-    void transferParts_singlePart_succeeds(List<DataSource.Part> inputStream) {
+    @ArgumentsSource(PartsInputs.class)
+    void transferParts_succeeds(List<DataSource.Part> inputStream, int expectedPartsPerObject) {
         var isSingleObject = inputStream.size() == 1;
 
         var result = dataSink.transferParts(inputStream);
@@ -94,28 +93,14 @@ public class S3DataSinkTest {
         verify(s3ClientMock, times(inputStream.size())).completeMultipartUpload(completeMultipartUploadRequestCaptor
                 .capture());
 
-        var completeMultipartUploadRequest = completeMultipartUploadRequestCaptor.getValue();
-        assertThat(completeMultipartUploadRequest.bucket()).isEqualTo(BUCKET_NAME);
-        assertThat(completeMultipartUploadRequest.key())
-                .isEqualTo(isSingleObject ? DESTINATION_OBJECT_NAME : SOURCE_OBJECT_NAME);
-        assertThat(completeMultipartUploadRequest.multipartUpload().parts()).hasSize(1);
-    }
+        var completeMultipartUploadRequests = completeMultipartUploadRequestCaptor.getAllValues();
 
-    @ParameterizedTest
-    @ArgumentsSource(MultiPartsInputs.class)
-    void transferParts_multiPart_succeeds(List<DataSource.Part> inputStream) {
-        var isSingleObject = inputStream.size() == 1;
-
-        var result = dataSink.transferParts(inputStream);
-
-        assertThat(result.succeeded()).isTrue();
-        verify(s3ClientMock, times(inputStream.size()))
-                .completeMultipartUpload(completeMultipartUploadRequestCaptor.capture());
-        var completeMultipartUploadRequest = completeMultipartUploadRequestCaptor.getValue();
-        assertThat(completeMultipartUploadRequest.bucket()).isEqualTo(BUCKET_NAME);
-        assertThat(completeMultipartUploadRequest.key())
-                .isEqualTo(isSingleObject ? DESTINATION_OBJECT_NAME : SOURCE_OBJECT_NAME);
-        assertThat(completeMultipartUploadRequest.multipartUpload().parts()).hasSize(2);
+		for(var request: completeMultipartUploadRequests){
+			assertThat(request.bucket()).isEqualTo(BUCKET_NAME);
+			assertThat(request.key())
+					.isEqualTo(isSingleObject ? DESTINATION_OBJECT_NAME : SOURCE_OBJECT_NAME);
+			assertThat(request.multipartUpload().parts()).hasSize(expectedPartsPerObject);
+		}
     }
 
     @Test
@@ -127,14 +112,14 @@ public class S3DataSinkTest {
 
         var result = dataSink.transferParts(List.of(part));
 
-        String expectedMessage = "Failed to download the %s object: %s".formatted(DESTINATION_OBJECT_NAME, ERROR_MESSAGE);
+        String expectedMessage = "GENERAL_ERROR: Failed to download the %s object: %s".formatted(DESTINATION_OBJECT_NAME, ERROR_MESSAGE);
 
         assertThat(result.failed()).isTrue();
         assertThat(result.getFailureDetail()).isEqualTo(expectedMessage);
     }
 
     @ParameterizedTest
-    @ArgumentsSource(MultiPartsInputs.class)
+    @ArgumentsSource(PartsInputs.class)
     void transferParts_fails_to_upload(List<DataSource.Part> inputStream) {
         var isSingleObject = inputStream.size() == 1;
 
@@ -155,36 +140,37 @@ public class S3DataSinkTest {
 
         var result = s3Datasink.transferParts(inputStream);
 
-        var expectedMessage = "Failed to upload the %s object: %s"
+        var expectedMessage = "GENERAL_ERROR: Failed to upload the %s object: %s"
                 .formatted(isSingleObject ? DESTINATION_OBJECT_NAME : SOURCE_OBJECT_NAME, ERROR_MESSAGE);
 
         assertThat(result.failed()).isTrue();
         assertThat(result.getFailureDetail()).isEqualTo(expectedMessage);
     }
 
-    private static class SinglePartsInputs implements ArgumentsProvider {
+    private static class PartsInputs implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            var content = "content smaller than a chunk size";
-            return Stream.of(Arguments.of(List.of(createDataSource(content))),
-                    Arguments.of(List.of(createDataSource(content)), List.of(createDataSource(content)))
-            );
+            var emptyContent = "";
+            var smallContent = "content smaller than a chunk size";
+            var bigContent = "content bigger than 50 bytes chunk size so that it gets chunked and uploaded as a multipart upload";
+            return Stream.of(
+                    Arguments.of(
+                            List.of(createDataSource(emptyContent)), 1),
+                    Arguments.of(
+                            List.of(createDataSource(smallContent)), 1),
+                    Arguments.of(
+                            List.of(createDataSource(bigContent)), 2),
+                    Arguments.of(
+                            List.of(createDataSource(emptyContent), createDataSource(smallContent)), 1),
+                    Arguments.of(
+                            List.of(createDataSource(bigContent), createDataSource(bigContent)), 2));
         }
-    }
-
-    private static class MultiPartsInputs implements ArgumentsProvider {
-        @Override
-        public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            var content = "content bigger than 50 bytes chunk size so that it gets chunked and uploaded as a multipart upload";
-            return Stream.of(Arguments.of(List.of(createDataSource(content))),
-                    Arguments.of(List.of(createDataSource(content)), List.of(createDataSource(content)))
-            );
-        }
-
     }
 
     private static InputStreamDataSource createDataSource(String text) {
-        var content = StringUtils.isBlank(text) ? "test stream" : text;
-        return new InputStreamDataSource(SOURCE_OBJECT_NAME, new ByteArrayInputStream(content.getBytes(UTF_8)));
+        if (text.length() > 0){
+                return new InputStreamDataSource(SOURCE_OBJECT_NAME, new ByteArrayInputStream(text.getBytes(UTF_8)));
+        }
+        return new InputStreamDataSource(SOURCE_OBJECT_NAME, new ByteArrayInputStream(new byte[0]));
     }
 }
